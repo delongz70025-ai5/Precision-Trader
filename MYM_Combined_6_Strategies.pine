@@ -1,0 +1,916 @@
+// This Pine Script™ v5 strategy combines 6 sub-strategies for MYM 1-minute charts.
+// Sub-strategies: ORB NY, ORB Tokyo, ORB London, RBR NY, RBR Tokyo, RBR London
+// Direction lock: once any sub enters, all others must match direction until all flat.
+
+//@version=5
+strategy("MYM Combined 6 Strategies", overlay=true, pyramiding=30,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=50000, currency=currency.USD,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
+     process_orders_on_close=true, calc_on_every_tick=false, close_entries_rule="ANY")
+
+// ─── GENERAL INPUTS ───
+pointValue   = input.float(0.5,  "Point Value",       group="General")
+feePerContract = input.float(0.62, "Fee Per Contract", group="General")
+
+// ─── ORB NY INPUTS ───
+orbNyTp1     = input.float(43.0,  "TP1 Points",       group="ORB NY")
+orbNyTp2     = input.float(45.0,  "TP2 Points",       group="ORB NY")
+orbNyTrail   = input.float(55.0,  "Trail Distance",   group="ORB NY")
+orbNyBe      = input.float(45.0,  "BE Trigger Points", group="ORB NY")
+orbNyCts     = input.int(6,       "Contracts",         group="ORB NY")
+orbNyC1      = input.int(2,       "TP1 Contracts",     group="ORB NY")
+orbNyC2      = input.int(2,       "TP2 Contracts",     group="ORB NY")
+orbNyMaxStop = input.float(180.0, "Max Stop Points",  group="ORB NY")
+orbNyMinRw   = input.float(115.0, "Min Range Width",  group="ORB NY")
+orbNyMaxRw   = input.float(205.0, "Max Range Width",  group="ORB NY")
+orbNyLastHr  = input.int(15,      "Last Entry Hour",  group="ORB NY")
+orbNyFlatHr  = input.int(16,      "Flatten Hour",     group="ORB NY")
+orbNyUseVol  = input.bool(true,   "Use Volume Filter", group="ORB NY")
+orbNyVolLb   = input.int(20,      "Volume Lookback",  group="ORB NY")
+orbNyVolMult = input.float(0.5,   "Volume Multiplier", group="ORB NY")
+orbNyUseAtr  = input.bool(true,   "Use ATR Filter",   group="ORB NY")
+orbNyAtrLen  = input.int(12,      "ATR Length",        group="ORB NY")
+orbNyAtrAvgLb = input.int(40,     "ATR Avg Lookback", group="ORB NY")
+orbNyMinAtrM = input.float(1.0,   "Min ATR Mult",     group="ORB NY")
+orbNyMaxAtrM = input.float(2.0,   "Max ATR Mult",     group="ORB NY")
+
+// ─── ORB TOKYO INPUTS ───
+orbTkTp1     = input.float(45.0,  "TP1 Points",       group="ORB Tokyo")
+orbTkTp2     = input.float(50.0,  "TP2 Points",       group="ORB Tokyo")
+orbTkTrail   = input.float(45.0,  "Trail Distance",   group="ORB Tokyo")
+orbTkBe      = input.float(50.0,  "BE Trigger Points", group="ORB Tokyo")
+orbTkCts     = input.int(6,       "Contracts",         group="ORB Tokyo")
+orbTkC1      = input.int(2,       "TP1 Contracts",     group="ORB Tokyo")
+orbTkC2      = input.int(2,       "TP2 Contracts",     group="ORB Tokyo")
+orbTkMaxStop = input.float(70.0,  "Max Stop Points",  group="ORB Tokyo")
+orbTkMinRw   = input.float(41.0,  "Min Range Width",  group="ORB Tokyo")
+orbTkMaxRw   = input.float(120.0, "Max Range Width",  group="ORB Tokyo")
+orbTkFlatHr  = input.int(15,      "Flatten Hour",     group="ORB Tokyo")
+
+// ─── ORB LONDON INPUTS ───
+orbLdTp1     = input.float(25.0,  "TP1 Points",       group="ORB London")
+orbLdTp2     = input.float(30.0,  "TP2 Points",       group="ORB London")
+orbLdTrail   = input.float(20.0,  "Trail Distance",   group="ORB London")
+orbLdBe      = input.float(30.0,  "BE Trigger Points", group="ORB London")
+orbLdCts     = input.int(6,       "Contracts",         group="ORB London")
+orbLdC1      = input.int(2,       "TP1 Contracts",     group="ORB London")
+orbLdC2      = input.int(2,       "TP2 Contracts",     group="ORB London")
+orbLdMaxStop = input.float(77.0,  "Max Stop Points",  group="ORB London")
+orbLdMinRw   = input.float(60.0,  "Min Range Width",  group="ORB London")
+orbLdMaxRw   = input.float(115.0, "Max Range Width",  group="ORB London")
+orbLdFlatHr  = input.int(16,      "Flatten Hour",     group="ORB London")
+
+// ─── RBR NY INPUTS ───
+rbrNyFast    = input.int(8,       "Fast EMA",         group="RBR NY")
+rbrNySlow    = input.int(20,      "Slow EMA",         group="RBR NY")
+rbrNyVolLb   = input.int(45,      "Volume Lookback",  group="RBR NY")
+rbrNyVolMult = input.float(1.7,   "Volume Multiplier", group="RBR NY")
+rbrNyBodyR   = input.float(0.6,   "Body Ratio",       group="RBR NY")
+rbrNyDojiR   = input.float(0.4,   "Doji Ratio",       group="RBR NY")
+rbrNyMaxBB   = input.int(3,       "Max Base Bars",    group="RBR NY")
+rbrNyLookback = input.int(40,     "Lookback",         group="RBR NY")
+rbrNyRisk    = input.float(35.0,  "Risk Points",      group="RBR NY")
+rbrNyRr1     = input.float(1.4,   "R:R TP1",          group="RBR NY")
+rbrNyRrRun   = input.float(3.4,   "R:R Runner",       group="RBR NY")
+rbrNyCts     = input.int(8,       "Contracts",         group="RBR NY")
+rbrNyTp1Cts  = input.int(4,       "TP1 Contracts",    group="RBR NY")
+rbrNyFlatHr  = input.int(16,      "Flatten Hour (NY)", group="RBR NY")
+
+// ─── RBR TOKYO INPUTS ───
+rbrTkFast    = input.int(5,       "Fast EMA",         group="RBR Tokyo")
+rbrTkSlow    = input.int(20,      "Slow EMA",         group="RBR Tokyo")
+rbrTkVolLb   = input.int(20,      "Volume Lookback",  group="RBR Tokyo")
+rbrTkVolMult = input.float(2.3,   "Volume Multiplier", group="RBR Tokyo")
+rbrTkBodyR   = input.float(0.6,   "Body Ratio",       group="RBR Tokyo")
+rbrTkDojiR   = input.float(0.4,   "Doji Ratio",       group="RBR Tokyo")
+rbrTkMaxBB   = input.int(3,       "Max Base Bars",    group="RBR Tokyo")
+rbrTkLookback = input.int(40,     "Lookback",         group="RBR Tokyo")
+rbrTkRisk    = input.float(14.0,  "Risk Points",      group="RBR Tokyo")
+rbrTkRr1     = input.float(1.2,   "R:R TP1",          group="RBR Tokyo")
+rbrTkRrRun   = input.float(3.1,   "R:R Runner",       group="RBR Tokyo")
+rbrTkCts     = input.int(6,       "Contracts",         group="RBR Tokyo")
+rbrTkTp1Cts  = input.int(2,       "TP1 Contracts",    group="RBR Tokyo")
+rbrTkTp2Cts  = input.int(2,       "TP2 Contracts",    group="RBR Tokyo")
+rbrTkFlatHr  = input.int(15,      "Flatten Hour (TK)", group="RBR Tokyo")
+
+// ─── RBR LONDON INPUTS ───
+rbrLdFast    = input.int(7,       "Fast EMA",         group="RBR London")
+rbrLdSlow    = input.int(21,      "Slow EMA",         group="RBR London")
+rbrLdVolLb   = input.int(5,       "Volume Lookback",  group="RBR London")
+rbrLdVolMult = input.float(2.1,   "Volume Multiplier", group="RBR London")
+rbrLdBodyR   = input.float(0.6,   "Body Ratio",       group="RBR London")
+rbrLdDojiR   = input.float(0.4,   "Doji Ratio",       group="RBR London")
+rbrLdMaxBB   = input.int(3,       "Max Base Bars",    group="RBR London")
+rbrLdLookback = input.int(40,     "Lookback",         group="RBR London")
+rbrLdRisk    = input.float(10.0,  "Risk Points",      group="RBR London")
+rbrLdRr1     = input.float(1.5,   "R:R TP1",          group="RBR London")
+rbrLdRrRun   = input.float(3.5,   "R:R Runner",       group="RBR London")
+rbrLdCts     = input.int(6,       "Contracts",         group="RBR London")
+rbrLdTp1Cts  = input.int(2,       "TP1 Contracts",    group="RBR London")
+rbrLdTp2Cts  = input.int(2,       "TP2 Contracts",    group="RBR London")
+rbrLdFlatHr  = input.int(16,      "Flatten Hour (LD)", group="RBR London")
+
+// ─── TIMEZONE HELPERS ───
+nyHour   = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+nyDay    = dayofmonth(time, "America/New_York")
+
+tkHour   = hour(time, "Asia/Tokyo")
+tkMinute = minute(time, "Asia/Tokyo")
+tkDay    = dayofmonth(time, "Asia/Tokyo")
+
+ldHour   = hour(time, "Europe/London")
+ldMinute = minute(time, "Europe/London")
+ldDay    = dayofmonth(time, "Europe/London")
+
+// ─── INDICATORS ───
+atrVal       = ta.atr(orbNyAtrLen)
+atrSma       = ta.sma(atrVal, orbNyAtrAvgLb)
+volSmaNy     = ta.sma(volume, orbNyVolLb)
+
+emaFastNy    = ta.ema(close, rbrNyFast)
+emaSlowNy    = ta.ema(close, rbrNySlow)
+volSmaRbrNy  = ta.sma(volume, rbrNyVolLb)
+
+emaFastTk    = ta.ema(close, rbrTkFast)
+emaSlowTk    = ta.ema(close, rbrTkSlow)
+volSmaRbrTk  = ta.sma(volume, rbrTkVolLb)
+
+emaFastLd    = ta.ema(close, rbrLdFast)
+emaSlowLd    = ta.ema(close, rbrLdSlow)
+volSmaRbrLd  = ta.sma(volume, rbrLdVolLb)
+
+barRange  = high - low
+bodyRatio = barRange > 0 ? math.abs(close - open) / barRange : 0.0
+
+// ─── DIRECTION LOCK ───
+var int lockedDir = 0
+
+// ─── RBR PATTERN DETECTION FUNCTION ───
+f_detectRBR(float bodyR, float dojiR, int maxBB, bool isBull) =>
+    found = false
+    for bc = 1 to maxBB
+        rallyOff = bc + 1
+        rallyRange = high[rallyOff] - low[rallyOff]
+        rallyBody = rallyRange > 0 ? math.abs(close[rallyOff] - open[rallyOff]) / rallyRange : 0.0
+        rallyIsBull = close[rallyOff] > open[rallyOff]
+        rallyIsBear = close[rallyOff] < open[rallyOff]
+        rallyOk = false
+        if isBull
+            rallyOk := rallyBody >= bodyR and rallyIsBull
+        else
+            rallyOk := rallyBody >= bodyR and rallyIsBear
+        if rallyOk
+            allBase = true
+            baseHigh = low[1]
+            baseLow  = high[1]
+            for j = 1 to bc
+                bRange = high[j] - low[j]
+                bBody  = bRange > 0 ? math.abs(close[j] - open[j]) / bRange : 0.0
+                if bBody > dojiR
+                    allBase := false
+                if high[j] > baseHigh
+                    baseHigh := high[j]
+                if low[j] < baseLow
+                    baseLow := low[j]
+            if allBase
+                if isBull and close > baseHigh
+                    found := true
+                if not isBull and close < baseLow
+                    found := true
+    found
+
+// ─── ORB NY STATE ───
+var float orbNyRangeHi    = na
+var float orbNyRangeLo    = na
+var int   orbNyPos        = 0
+var float orbNyEntryPx    = na
+var bool  orbNyTp1Filled  = false
+var bool  orbNyTp2Filled  = false
+var float orbNyRunnerTrail = na
+var float orbNyRunnerStop = na
+var bool  orbNyTraded     = false
+var bool  orbNyLost       = false
+var bool  orbNyBroken     = false
+var int   orbNyPrevDay    = na
+
+// ─── ORB TOKYO STATE ───
+var float orbTkRangeHi    = na
+var float orbTkRangeLo    = na
+var int   orbTkPos        = 0
+var float orbTkEntryPx    = na
+var bool  orbTkTp1Filled  = false
+var bool  orbTkTp2Filled  = false
+var float orbTkRunnerTrail = na
+var float orbTkRunnerStop = na
+var bool  orbTkTraded     = false
+var bool  orbTkLost       = false
+var bool  orbTkBroken     = false
+var int   orbTkPrevDay    = na
+
+// ─── ORB LONDON STATE ───
+var float orbLdRangeHi    = na
+var float orbLdRangeLo    = na
+var int   orbLdPos        = 0
+var float orbLdEntryPx    = na
+var bool  orbLdTp1Filled  = false
+var bool  orbLdTp2Filled  = false
+var float orbLdRunnerTrail = na
+var float orbLdRunnerStop = na
+var bool  orbLdTraded     = false
+var bool  orbLdLost       = false
+var bool  orbLdBroken     = false
+var int   orbLdPrevDay    = na
+
+// ─── RBR NY STATE ───
+var int   rbrNyPos        = 0
+var float rbrNyEntryPx    = na
+var float rbrNyStopPx     = na
+var float rbrNyTp1Px      = na
+var float rbrNyRunnerPx   = na
+var bool  rbrNyTp1Filled  = false
+
+// ─── RBR TOKYO STATE ───
+var int   rbrTkPos        = 0
+var float rbrTkEntryPx    = na
+var float rbrTkStopPx     = na
+var float rbrTkTp1Px      = na
+var float rbrTkTp2Px      = na
+var float rbrTkRunnerPx   = na
+var bool  rbrTkTp1Filled  = false
+var bool  rbrTkTp2Filled  = false
+
+// ─── RBR LONDON STATE ───
+var int   rbrLdPos        = 0
+var float rbrLdEntryPx    = na
+var float rbrLdStopPx     = na
+var float rbrLdTp1Px      = na
+var float rbrLdTp2Px      = na
+var float rbrLdRunnerPx   = na
+var bool  rbrLdTp1Filled  = false
+var bool  rbrLdTp2Filled  = false
+
+// ─── PREVIOUS POSITION TRACKING (for per-strategy order labels) ───
+var int prevOrbNyPos = 0
+var int prevOrbTkPos = 0
+var int prevOrbLdPos = 0
+var int prevRbrNyPos = 0
+var int prevRbrTkPos = 0
+var int prevRbrLdPos = 0
+
+// ─── DAY RESET DETECTION ───
+nyNewDay = ta.change(nyDay) != 0
+tkNewDay = ta.change(tkDay) != 0
+ldNewDay = ta.change(ldDay) != 0
+
+// ORB NY daily reset
+if nyNewDay
+    orbNyRangeHi   := na
+    orbNyRangeLo   := na
+    orbNyTraded    := false
+    orbNyLost      := false
+    orbNyBroken    := false
+    orbNyRunnerTrail := na
+    orbNyPrevDay   := nyDay
+
+// ORB Tokyo daily reset
+if tkNewDay
+    orbTkRangeHi   := na
+    orbTkRangeLo   := na
+    orbTkTraded    := false
+    orbTkLost      := false
+    orbTkBroken    := false
+    orbTkRunnerTrail := na
+    orbTkPrevDay   := tkDay
+
+// ORB London daily reset
+if ldNewDay
+    orbLdRangeHi   := na
+    orbLdRangeLo   := na
+    orbLdTraded    := false
+    orbLdLost      := false
+    orbLdBroken    := false
+    orbLdRunnerTrail := na
+    orbLdPrevDay   := ldDay
+
+// ─── DIRECTION LOCK UPDATE ───
+anyOpen = orbNyPos != 0 or orbTkPos != 0 or orbLdPos != 0 or rbrNyPos != 0 or rbrTkPos != 0 or rbrLdPos != 0
+if not anyOpen
+    lockedDir := 0
+
+// ═══════════════════════════════════════════════════════════════
+// ORB NY LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+// Range collection: NY hour=9, minute 30-44
+orbNyInRange = nyHour == 9 and nyMinute >= 30 and nyMinute <= 44
+if orbNyInRange
+    if na(orbNyRangeHi)
+        orbNyRangeHi := high
+        orbNyRangeLo := low
+    else
+        orbNyRangeHi := math.max(nz(orbNyRangeHi), high)
+        orbNyRangeLo := math.min(nz(orbNyRangeLo), low)
+
+// After range period
+orbNyAfterRange = nyHour > 9 or (nyHour == 9 and nyMinute >= 45)
+orbNyEntryOk    = nyHour < orbNyLastHr
+orbNyFlatTime   = nyHour >= orbNyFlatHr
+orbNyRangeWidth = nz(orbNyRangeHi) - nz(orbNyRangeLo)
+orbNyRangeValid = not na(orbNyRangeHi) and orbNyRangeWidth >= orbNyMinRw and orbNyRangeWidth <= orbNyMaxRw
+
+// Volume filter
+orbNyVolOk = not orbNyUseVol or (volume >= nz(volSmaNy) * orbNyVolMult)
+// ATR filter
+orbNyAtrOk = not orbNyUseAtr or (not na(atrVal) and not na(atrSma) and atrVal >= atrSma * orbNyMinAtrM and atrVal <= atrSma * orbNyMaxAtrM)
+
+// Entry conditions
+orbNyCanEnterLong  = orbNyPos == 0 and orbNyAfterRange and orbNyEntryOk and not orbNyTraded and not orbNyLost and not orbNyBroken and orbNyRangeValid and orbNyVolOk and orbNyAtrOk and close > nz(orbNyRangeHi) and (lockedDir == 0 or lockedDir == 1)
+orbNyCanEnterShort = orbNyPos == 0 and orbNyAfterRange and orbNyEntryOk and not orbNyTraded and not orbNyLost and not orbNyBroken and orbNyRangeValid and orbNyVolOk and orbNyAtrOk and close < nz(orbNyRangeLo) and (lockedDir == 0 or lockedDir == -1)
+
+// Entry
+if orbNyCanEnterLong
+    orbNyPos       := orbNyCts
+    orbNyEntryPx   := close
+    orbNyTp1Filled := false
+    orbNyTp2Filled := false
+    orbNyRunnerTrail := na
+    orbNyRunnerStop := na
+    orbNyTraded    := true
+    orbNyBroken    := true
+    lockedDir      := 1
+
+if orbNyCanEnterShort
+    orbNyPos       := -orbNyCts
+    orbNyEntryPx   := close
+    orbNyTp1Filled := false
+    orbNyTp2Filled := false
+    orbNyRunnerTrail := na
+    orbNyRunnerStop := na
+    orbNyTraded    := true
+    orbNyBroken    := true
+    lockedDir      := -1
+
+// EOD flatten
+if orbNyFlatTime and orbNyPos != 0
+    orbNyPos := 0
+
+// Exit long
+if orbNyPos > 0 and not orbNyFlatTime
+    baseStop = math.max(nz(orbNyRangeLo), orbNyEntryPx - orbNyMaxStop)
+    // TP1
+    if high >= orbNyEntryPx + orbNyTp1 and not orbNyTp1Filled
+        orbNyTp1Filled := true
+        orbNyPos       := orbNyPos - orbNyC1
+    // TP2
+    if orbNyPos > 0 and high >= orbNyEntryPx + orbNyTp2 and not orbNyTp2Filled
+        orbNyTp2Filled := true
+        orbNyPos       := orbNyPos - orbNyC2
+    // Runner trail
+    if orbNyPos > 0 and orbNyTp2Filled
+        orbNyRunnerTrail := na(orbNyRunnerTrail) ? high - orbNyTrail : math.max(nz(orbNyRunnerTrail), high - orbNyTrail)
+    // Runner stop
+    runnerStopNyL = baseStop
+    if orbNyTp2Filled
+        if high >= orbNyEntryPx + orbNyBe
+            runnerStopNyL := math.max(runnerStopNyL, orbNyEntryPx)
+        if not na(orbNyRunnerTrail)
+            runnerStopNyL := math.max(runnerStopNyL, nz(orbNyRunnerTrail))
+    orbNyRunnerStop := runnerStopNyL
+    // Final stop
+    finalStopNyL = orbNyTp2Filled ? nz(orbNyRunnerStop, baseStop) : baseStop
+    if orbNyPos > 0 and low <= finalStopNyL
+        orbNyLost := not orbNyTp1Filled
+        orbNyPos  := 0
+
+// Exit short
+if orbNyPos < 0 and not orbNyFlatTime
+    baseStopS = math.min(nz(orbNyRangeHi), orbNyEntryPx + orbNyMaxStop)
+    // TP1
+    if low <= orbNyEntryPx - orbNyTp1 and not orbNyTp1Filled
+        orbNyTp1Filled := true
+        orbNyPos       := orbNyPos + orbNyC1
+    // TP2
+    if orbNyPos < 0 and low <= orbNyEntryPx - orbNyTp2 and not orbNyTp2Filled
+        orbNyTp2Filled := true
+        orbNyPos       := orbNyPos + orbNyC2
+    // Runner trail
+    if orbNyPos < 0 and orbNyTp2Filled
+        orbNyRunnerTrail := na(orbNyRunnerTrail) ? low + orbNyTrail : math.min(nz(orbNyRunnerTrail), low + orbNyTrail)
+    // Runner stop
+    runnerStopNyS = baseStopS
+    if orbNyTp2Filled
+        if low <= orbNyEntryPx - orbNyBe
+            runnerStopNyS := math.min(runnerStopNyS, orbNyEntryPx)
+        if not na(orbNyRunnerTrail)
+            runnerStopNyS := math.min(runnerStopNyS, nz(orbNyRunnerTrail))
+    orbNyRunnerStop := runnerStopNyS
+    finalStopNyS = orbNyTp2Filled ? nz(orbNyRunnerStop, baseStopS) : baseStopS
+    if orbNyPos < 0 and high >= finalStopNyS
+        orbNyLost := not orbNyTp1Filled
+        orbNyPos  := 0
+
+// ═══════════════════════════════════════════════════════════════
+// ORB TOKYO LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+// Range collection: Tokyo hour=9, minute 0-14
+orbTkInRange = tkHour == 9 and tkMinute >= 0 and tkMinute <= 14
+if orbTkInRange
+    if na(orbTkRangeHi)
+        orbTkRangeHi := high
+        orbTkRangeLo := low
+    else
+        orbTkRangeHi := math.max(nz(orbTkRangeHi), high)
+        orbTkRangeLo := math.min(nz(orbTkRangeLo), low)
+
+orbTkAfterRange = tkHour > 9 or (tkHour == 9 and tkMinute >= 15)
+orbTkEntryOk    = tkHour < orbTkFlatHr
+orbTkFlatTime   = tkHour >= orbTkFlatHr
+orbTkRangeWidth = nz(orbTkRangeHi) - nz(orbTkRangeLo)
+orbTkRangeValid = not na(orbTkRangeHi) and orbTkRangeWidth >= orbTkMinRw and orbTkRangeWidth <= orbTkMaxRw
+
+// Entry conditions (no volume/ATR filter)
+orbTkCanEnterLong  = orbTkPos == 0 and orbTkAfterRange and orbTkEntryOk and not orbTkTraded and not orbTkLost and not orbTkBroken and orbTkRangeValid and close > nz(orbTkRangeHi) and (lockedDir == 0 or lockedDir == 1)
+orbTkCanEnterShort = orbTkPos == 0 and orbTkAfterRange and orbTkEntryOk and not orbTkTraded and not orbTkLost and not orbTkBroken and orbTkRangeValid and close < nz(orbTkRangeLo) and (lockedDir == 0 or lockedDir == -1)
+
+// Entry
+if orbTkCanEnterLong
+    orbTkPos       := orbTkCts
+    orbTkEntryPx   := close
+    orbTkTp1Filled := false
+    orbTkTp2Filled := false
+    orbTkRunnerTrail := na
+    orbTkRunnerStop := na
+    orbTkTraded    := true
+    orbTkBroken    := true
+    lockedDir      := 1
+
+if orbTkCanEnterShort
+    orbTkPos       := -orbTkCts
+    orbTkEntryPx   := close
+    orbTkTp1Filled := false
+    orbTkTp2Filled := false
+    orbTkRunnerTrail := na
+    orbTkRunnerStop := na
+    orbTkTraded    := true
+    orbTkBroken    := true
+    lockedDir      := -1
+
+// EOD flatten
+if orbTkFlatTime and orbTkPos != 0
+    orbTkPos := 0
+
+// Exit long
+if orbTkPos > 0 and not orbTkFlatTime
+    baseStopTkL = math.max(nz(orbTkRangeLo), orbTkEntryPx - orbTkMaxStop)
+    // TP1
+    if high >= orbTkEntryPx + orbTkTp1 and not orbTkTp1Filled
+        orbTkTp1Filled := true
+        orbTkPos       := orbTkPos - orbTkC1
+    // TP2
+    if orbTkPos > 0 and high >= orbTkEntryPx + orbTkTp2 and not orbTkTp2Filled
+        orbTkTp2Filled := true
+        orbTkPos       := orbTkPos - orbTkC2
+    // Runner trail
+    if orbTkPos > 0 and orbTkTp2Filled
+        orbTkRunnerTrail := na(orbTkRunnerTrail) ? high - orbTkTrail : math.max(nz(orbTkRunnerTrail), high - orbTkTrail)
+    // Runner stop
+    runnerStopTkL = baseStopTkL
+    if orbTkTp2Filled
+        if high >= orbTkEntryPx + orbTkBe
+            runnerStopTkL := math.max(runnerStopTkL, orbTkEntryPx)
+        if not na(orbTkRunnerTrail)
+            runnerStopTkL := math.max(runnerStopTkL, nz(orbTkRunnerTrail))
+    orbTkRunnerStop := runnerStopTkL
+    finalStopTkL = orbTkTp2Filled ? nz(orbTkRunnerStop, baseStopTkL) : baseStopTkL
+    if orbTkPos > 0 and low <= finalStopTkL
+        orbTkLost := not orbTkTp1Filled
+        orbTkPos  := 0
+
+// Exit short
+if orbTkPos < 0 and not orbTkFlatTime
+    baseStopTkS = math.min(nz(orbTkRangeHi), orbTkEntryPx + orbTkMaxStop)
+    // TP1
+    if low <= orbTkEntryPx - orbTkTp1 and not orbTkTp1Filled
+        orbTkTp1Filled := true
+        orbTkPos       := orbTkPos + orbTkC1
+    // TP2
+    if orbTkPos < 0 and low <= orbTkEntryPx - orbTkTp2 and not orbTkTp2Filled
+        orbTkTp2Filled := true
+        orbTkPos       := orbTkPos + orbTkC2
+    // Runner trail
+    if orbTkPos < 0 and orbTkTp2Filled
+        orbTkRunnerTrail := na(orbTkRunnerTrail) ? low + orbTkTrail : math.min(nz(orbTkRunnerTrail), low + orbTkTrail)
+    // Runner stop
+    runnerStopTkS = baseStopTkS
+    if orbTkTp2Filled
+        if low <= orbTkEntryPx - orbTkBe
+            runnerStopTkS := math.min(runnerStopTkS, orbTkEntryPx)
+        if not na(orbTkRunnerTrail)
+            runnerStopTkS := math.min(runnerStopTkS, nz(orbTkRunnerTrail))
+    orbTkRunnerStop := runnerStopTkS
+    finalStopTkS = orbTkTp2Filled ? nz(orbTkRunnerStop, baseStopTkS) : baseStopTkS
+    if orbTkPos < 0 and high >= finalStopTkS
+        orbTkLost := not orbTkTp1Filled
+        orbTkPos  := 0
+
+// ═══════════════════════════════════════════════════════════════
+// ORB LONDON LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+// Range collection: London hour=8, minute 0-14
+orbLdInRange = ldHour == 8 and ldMinute >= 0 and ldMinute <= 14
+if orbLdInRange
+    if na(orbLdRangeHi)
+        orbLdRangeHi := high
+        orbLdRangeLo := low
+    else
+        orbLdRangeHi := math.max(nz(orbLdRangeHi), high)
+        orbLdRangeLo := math.min(nz(orbLdRangeLo), low)
+
+orbLdAfterRange = ldHour > 8 or (ldHour == 8 and ldMinute >= 15)
+orbLdEntryOk    = ldHour < orbLdFlatHr
+orbLdFlatTime   = ldHour >= orbLdFlatHr
+orbLdRangeWidth = nz(orbLdRangeHi) - nz(orbLdRangeLo)
+orbLdRangeValid = not na(orbLdRangeHi) and orbLdRangeWidth >= orbLdMinRw and orbLdRangeWidth <= orbLdMaxRw
+
+// Entry conditions (no volume/ATR filter)
+orbLdCanEnterLong  = orbLdPos == 0 and orbLdAfterRange and orbLdEntryOk and not orbLdTraded and not orbLdLost and not orbLdBroken and orbLdRangeValid and close > nz(orbLdRangeHi) and (lockedDir == 0 or lockedDir == 1)
+orbLdCanEnterShort = orbLdPos == 0 and orbLdAfterRange and orbLdEntryOk and not orbLdTraded and not orbLdLost and not orbLdBroken and orbLdRangeValid and close < nz(orbLdRangeLo) and (lockedDir == 0 or lockedDir == -1)
+
+// Entry
+if orbLdCanEnterLong
+    orbLdPos       := orbLdCts
+    orbLdEntryPx   := close
+    orbLdTp1Filled := false
+    orbLdTp2Filled := false
+    orbLdRunnerTrail := na
+    orbLdRunnerStop := na
+    orbLdTraded    := true
+    orbLdBroken    := true
+    lockedDir      := 1
+
+if orbLdCanEnterShort
+    orbLdPos       := -orbLdCts
+    orbLdEntryPx   := close
+    orbLdTp1Filled := false
+    orbLdTp2Filled := false
+    orbLdRunnerTrail := na
+    orbLdRunnerStop := na
+    orbLdTraded    := true
+    orbLdBroken    := true
+    lockedDir      := -1
+
+// EOD flatten
+if orbLdFlatTime and orbLdPos != 0
+    orbLdPos := 0
+
+// Exit long
+if orbLdPos > 0 and not orbLdFlatTime
+    baseStopLdL = math.max(nz(orbLdRangeLo), orbLdEntryPx - orbLdMaxStop)
+    // TP1
+    if high >= orbLdEntryPx + orbLdTp1 and not orbLdTp1Filled
+        orbLdTp1Filled := true
+        orbLdPos       := orbLdPos - orbLdC1
+    // TP2
+    if orbLdPos > 0 and high >= orbLdEntryPx + orbLdTp2 and not orbLdTp2Filled
+        orbLdTp2Filled := true
+        orbLdPos       := orbLdPos - orbLdC2
+    // Runner trail
+    if orbLdPos > 0 and orbLdTp2Filled
+        orbLdRunnerTrail := na(orbLdRunnerTrail) ? high - orbLdTrail : math.max(nz(orbLdRunnerTrail), high - orbLdTrail)
+    // Runner stop
+    runnerStopLdL = baseStopLdL
+    if orbLdTp2Filled
+        if high >= orbLdEntryPx + orbLdBe
+            runnerStopLdL := math.max(runnerStopLdL, orbLdEntryPx)
+        if not na(orbLdRunnerTrail)
+            runnerStopLdL := math.max(runnerStopLdL, nz(orbLdRunnerTrail))
+    orbLdRunnerStop := runnerStopLdL
+    finalStopLdL = orbLdTp2Filled ? nz(orbLdRunnerStop, baseStopLdL) : baseStopLdL
+    if orbLdPos > 0 and low <= finalStopLdL
+        orbLdLost := not orbLdTp1Filled
+        orbLdPos  := 0
+
+// Exit short
+if orbLdPos < 0 and not orbLdFlatTime
+    baseStopLdS = math.min(nz(orbLdRangeHi), orbLdEntryPx + orbLdMaxStop)
+    // TP1
+    if low <= orbLdEntryPx - orbLdTp1 and not orbLdTp1Filled
+        orbLdTp1Filled := true
+        orbLdPos       := orbLdPos + orbLdC1
+    // TP2
+    if orbLdPos < 0 and low <= orbLdEntryPx - orbLdTp2 and not orbLdTp2Filled
+        orbLdTp2Filled := true
+        orbLdPos       := orbLdPos + orbLdC2
+    // Runner trail
+    if orbLdPos < 0 and orbLdTp2Filled
+        orbLdRunnerTrail := na(orbLdRunnerTrail) ? low + orbLdTrail : math.min(nz(orbLdRunnerTrail), low + orbLdTrail)
+    // Runner stop
+    runnerStopLdS = baseStopLdS
+    if orbLdTp2Filled
+        if low <= orbLdEntryPx - orbLdBe
+            runnerStopLdS := math.min(runnerStopLdS, orbLdEntryPx)
+        if not na(orbLdRunnerTrail)
+            runnerStopLdS := math.min(runnerStopLdS, nz(orbLdRunnerTrail))
+    orbLdRunnerStop := runnerStopLdS
+    finalStopLdS = orbLdTp2Filled ? nz(orbLdRunnerStop, baseStopLdS) : baseStopLdS
+    if orbLdPos < 0 and high >= finalStopLdS
+        orbLdLost := not orbLdTp1Filled
+        orbLdPos  := 0
+
+// ═══════════════════════════════════════════════════════════════
+// RBR NY LOGIC
+// ═══════════════════════════════════════════════════════════════
+
+rbrNyFlatTime = nyHour >= rbrNyFlatHr
+if rbrNyFlatTime and rbrNyPos != 0
+    rbrNyPos := 0
+
+rbrNyInSession = (nyHour == 9 and nyMinute >= 30) or nyHour == 10 or (nyHour == 11 and nyMinute < 30)
+
+rbrNyUptrend   = emaFastNy > emaSlowNy
+rbrNyDowntrend = emaFastNy < emaSlowNy
+rbrNyVolSpike  = volume >= nz(volSmaRbrNy) * rbrNyVolMult
+rbrNyBullConf  = close > open
+rbrNyBearConf  = close < open
+rbrNyEmaTouchBull = low <= math.max(emaFastNy, emaSlowNy) and close > math.max(emaFastNy, emaSlowNy)
+rbrNyEmaTouchBear = high >= math.min(emaFastNy, emaSlowNy) and close < math.min(emaFastNy, emaSlowNy)
+
+rbrNyRbrFound = f_detectRBR(rbrNyBodyR, rbrNyDojiR, rbrNyMaxBB, true)
+rbrNyDbdFound = f_detectRBR(rbrNyBodyR, rbrNyDojiR, rbrNyMaxBB, false)
+
+rbrNyLongSig  = rbrNyInSession and rbrNyUptrend and rbrNyRbrFound and rbrNyEmaTouchBull and rbrNyVolSpike and rbrNyBullConf
+rbrNyShortSig = rbrNyInSession and rbrNyDowntrend and rbrNyDbdFound and rbrNyEmaTouchBear and rbrNyVolSpike and rbrNyBearConf
+
+// Entry long
+if rbrNyPos == 0 and not rbrNyFlatTime and rbrNyLongSig and (lockedDir == 0 or lockedDir == 1)
+    rbrNyPos       := rbrNyCts
+    rbrNyEntryPx   := close
+    rbrNyStopPx    := close - rbrNyRisk
+    rbrNyTp1Px     := close + rbrNyRisk * rbrNyRr1
+    rbrNyRunnerPx  := close + rbrNyRisk * rbrNyRrRun
+    rbrNyTp1Filled := false
+    lockedDir      := 1
+
+// Entry short
+if rbrNyPos == 0 and not rbrNyFlatTime and rbrNyShortSig and (lockedDir == 0 or lockedDir == -1)
+    rbrNyPos       := -rbrNyCts
+    rbrNyEntryPx   := close
+    rbrNyStopPx    := close + rbrNyRisk
+    rbrNyTp1Px     := close - rbrNyRisk * rbrNyRr1
+    rbrNyRunnerPx  := close - rbrNyRisk * rbrNyRrRun
+    rbrNyTp1Filled := false
+    lockedDir      := -1
+
+// Exit long
+if rbrNyPos > 0
+    // Stop loss first
+    if low <= rbrNyStopPx
+        rbrNyPos := 0
+    else
+        // TP1 (closes rbrNyTp1Cts contracts)
+        if high >= rbrNyTp1Px and not rbrNyTp1Filled
+            rbrNyTp1Filled := true
+            rbrNyPos       := rbrNyPos - rbrNyTp1Cts
+        // Runner
+        if rbrNyPos > 0 and high >= rbrNyRunnerPx
+            rbrNyPos := 0
+
+// Exit short
+if rbrNyPos < 0
+    // Stop loss first
+    if high >= rbrNyStopPx
+        rbrNyPos := 0
+    else
+        // TP1 (closes rbrNyTp1Cts contracts)
+        if low <= rbrNyTp1Px and not rbrNyTp1Filled
+            rbrNyTp1Filled := true
+            rbrNyPos       := rbrNyPos + rbrNyTp1Cts
+        // Runner
+        if rbrNyPos < 0 and low <= rbrNyRunnerPx
+            rbrNyPos := 0
+
+// ═══════════════════════════════════════════════════════════════
+// RBR TOKYO LOGIC (3 TP levels)
+// ═══════════════════════════════════════════════════════════════
+
+rbrTkFlatTime = tkHour >= rbrTkFlatHr
+if rbrTkFlatTime and rbrTkPos != 0
+    rbrTkPos := 0
+
+rbrTkInSession = tkHour >= 9 and tkHour < 11
+
+rbrTkUptrend   = emaFastTk > emaSlowTk
+rbrTkDowntrend = emaFastTk < emaSlowTk
+rbrTkVolSpike  = volume >= nz(volSmaRbrTk) * rbrTkVolMult
+rbrTkBullConf  = close > open
+rbrTkBearConf  = close < open
+rbrTkEmaTouchBull = low <= math.max(emaFastTk, emaSlowTk) and close > math.max(emaFastTk, emaSlowTk)
+rbrTkEmaTouchBear = high >= math.min(emaFastTk, emaSlowTk) and close < math.min(emaFastTk, emaSlowTk)
+
+rbrTkRbrFound = f_detectRBR(rbrTkBodyR, rbrTkDojiR, rbrTkMaxBB, true)
+rbrTkDbdFound = f_detectRBR(rbrTkBodyR, rbrTkDojiR, rbrTkMaxBB, false)
+
+rbrTkLongSig  = rbrTkInSession and rbrTkUptrend and rbrTkRbrFound and rbrTkEmaTouchBull and rbrTkVolSpike and rbrTkBullConf
+rbrTkShortSig = rbrTkInSession and rbrTkDowntrend and rbrTkDbdFound and rbrTkEmaTouchBear and rbrTkVolSpike and rbrTkBearConf
+
+// Entry long
+if rbrTkPos == 0 and not rbrTkFlatTime and rbrTkLongSig and (lockedDir == 0 or lockedDir == 1)
+    rbrTkPos       := rbrTkCts
+    rbrTkEntryPx   := close
+    rbrTkStopPx    := close - rbrTkRisk
+    rbrTkTp1Px     := close + rbrTkRisk * rbrTkRr1
+    rbrTkTp2Px     := close + rbrTkRisk * ((rbrTkRr1 + rbrTkRrRun) / 2)
+    rbrTkRunnerPx  := close + rbrTkRisk * rbrTkRrRun
+    rbrTkTp1Filled := false
+    rbrTkTp2Filled := false
+    lockedDir      := 1
+
+// Entry short
+if rbrTkPos == 0 and not rbrTkFlatTime and rbrTkShortSig and (lockedDir == 0 or lockedDir == -1)
+    rbrTkPos       := -rbrTkCts
+    rbrTkEntryPx   := close
+    rbrTkStopPx    := close + rbrTkRisk
+    rbrTkTp1Px     := close - rbrTkRisk * rbrTkRr1
+    rbrTkTp2Px     := close - rbrTkRisk * ((rbrTkRr1 + rbrTkRrRun) / 2)
+    rbrTkRunnerPx  := close - rbrTkRisk * rbrTkRrRun
+    rbrTkTp1Filled := false
+    rbrTkTp2Filled := false
+    lockedDir      := -1
+
+// Exit long (3 TPs)
+if rbrTkPos > 0
+    // Stop loss first
+    if low <= rbrTkStopPx
+        rbrTkPos := 0
+    else
+        // TP1
+        if high >= rbrTkTp1Px and not rbrTkTp1Filled
+            rbrTkTp1Filled := true
+            rbrTkPos       := rbrTkPos - rbrTkTp1Cts
+        // TP2
+        if rbrTkPos > 0 and high >= rbrTkTp2Px and not rbrTkTp2Filled
+            rbrTkTp2Filled := true
+            rbrTkPos       := rbrTkPos - rbrTkTp2Cts
+        // Runner
+        if rbrTkPos > 0 and high >= rbrTkRunnerPx
+            rbrTkPos := 0
+
+// Exit short (3 TPs)
+if rbrTkPos < 0
+    // Stop loss first
+    if high >= rbrTkStopPx
+        rbrTkPos := 0
+    else
+        // TP1
+        if low <= rbrTkTp1Px and not rbrTkTp1Filled
+            rbrTkTp1Filled := true
+            rbrTkPos       := rbrTkPos + rbrTkTp1Cts
+        // TP2
+        if rbrTkPos < 0 and low <= rbrTkTp2Px and not rbrTkTp2Filled
+            rbrTkTp2Filled := true
+            rbrTkPos       := rbrTkPos + rbrTkTp2Cts
+        // Runner
+        if rbrTkPos < 0 and low <= rbrTkRunnerPx
+            rbrTkPos := 0
+
+// ═══════════════════════════════════════════════════════════════
+// RBR LONDON LOGIC (3 TP levels)
+// ═══════════════════════════════════════════════════════════════
+
+rbrLdFlatTime = ldHour >= rbrLdFlatHr
+if rbrLdFlatTime and rbrLdPos != 0
+    rbrLdPos := 0
+
+rbrLdInSession = ldHour >= 8 and ldHour < 10
+
+rbrLdUptrend   = emaFastLd > emaSlowLd
+rbrLdDowntrend = emaFastLd < emaSlowLd
+rbrLdVolSpike  = volume >= nz(volSmaRbrLd) * rbrLdVolMult
+rbrLdBullConf  = close > open
+rbrLdBearConf  = close < open
+rbrLdEmaTouchBull = low <= math.max(emaFastLd, emaSlowLd) and close > math.max(emaFastLd, emaSlowLd)
+rbrLdEmaTouchBear = high >= math.min(emaFastLd, emaSlowLd) and close < math.min(emaFastLd, emaSlowLd)
+
+rbrLdRbrFound = f_detectRBR(rbrLdBodyR, rbrLdDojiR, rbrLdMaxBB, true)
+rbrLdDbdFound = f_detectRBR(rbrLdBodyR, rbrLdDojiR, rbrLdMaxBB, false)
+
+rbrLdLongSig  = rbrLdInSession and rbrLdUptrend and rbrLdRbrFound and rbrLdEmaTouchBull and rbrLdVolSpike and rbrLdBullConf
+rbrLdShortSig = rbrLdInSession and rbrLdDowntrend and rbrLdDbdFound and rbrLdEmaTouchBear and rbrLdVolSpike and rbrLdBearConf
+
+// Entry long
+if rbrLdPos == 0 and not rbrLdFlatTime and rbrLdLongSig and (lockedDir == 0 or lockedDir == 1)
+    rbrLdPos       := rbrLdCts
+    rbrLdEntryPx   := close
+    rbrLdStopPx    := close - rbrLdRisk
+    rbrLdTp1Px     := close + rbrLdRisk * rbrLdRr1
+    rbrLdTp2Px     := close + rbrLdRisk * ((rbrLdRr1 + rbrLdRrRun) / 2)
+    rbrLdRunnerPx  := close + rbrLdRisk * rbrLdRrRun
+    rbrLdTp1Filled := false
+    rbrLdTp2Filled := false
+    lockedDir      := 1
+
+// Entry short
+if rbrLdPos == 0 and not rbrLdFlatTime and rbrLdShortSig and (lockedDir == 0 or lockedDir == -1)
+    rbrLdPos       := -rbrLdCts
+    rbrLdEntryPx   := close
+    rbrLdStopPx    := close + rbrLdRisk
+    rbrLdTp1Px     := close - rbrLdRisk * rbrLdRr1
+    rbrLdTp2Px     := close - rbrLdRisk * ((rbrLdRr1 + rbrLdRrRun) / 2)
+    rbrLdRunnerPx  := close - rbrLdRisk * rbrLdRrRun
+    rbrLdTp1Filled := false
+    rbrLdTp2Filled := false
+    lockedDir      := -1
+
+// Exit long (3 TPs)
+if rbrLdPos > 0
+    // Stop loss first
+    if low <= rbrLdStopPx
+        rbrLdPos := 0
+    else
+        // TP1 (closes rbrLdTp1Cts contracts)
+        if high >= rbrLdTp1Px and not rbrLdTp1Filled
+            rbrLdTp1Filled := true
+            rbrLdPos       := rbrLdPos - rbrLdTp1Cts
+        // TP2 (closes rbrLdTp2Cts contracts)
+        if rbrLdPos > 0 and high >= rbrLdTp2Px and not rbrLdTp2Filled
+            rbrLdTp2Filled := true
+            rbrLdPos       := rbrLdPos - rbrLdTp2Cts
+        // Runner
+        if rbrLdPos > 0 and high >= rbrLdRunnerPx
+            rbrLdPos := 0
+
+// Exit short (3 TPs)
+if rbrLdPos < 0
+    // Stop loss first
+    if high >= rbrLdStopPx
+        rbrLdPos := 0
+    else
+        // TP1 (closes rbrLdTp1Cts contracts)
+        if low <= rbrLdTp1Px and not rbrLdTp1Filled
+            rbrLdTp1Filled := true
+            rbrLdPos       := rbrLdPos + rbrLdTp1Cts
+        // TP2 (closes rbrLdTp2Cts contracts)
+        if rbrLdPos < 0 and low <= rbrLdTp2Px and not rbrLdTp2Filled
+            rbrLdTp2Filled := true
+            rbrLdPos       := rbrLdPos + rbrLdTp2Cts
+        // Runner
+        if rbrLdPos < 0 and low <= rbrLdRunnerPx
+            rbrLdPos := 0
+
+// ═══════════════════════════════════════════════════════════════
+// PER-STRATEGY POSITION SYNC — labeled orders for each sub-strategy
+// ═══════════════════════════════════════════════════════════════
+// Compare each sub-strategy's current position vs previous bar.
+// Issue individual orders so each gets its own label on chart/trade list.
+
+f_syncSub(string label, int cur, int prev) =>
+    d = cur - prev
+    if d > 0
+        strategy.order(label, strategy.long, qty=d)
+    else if d < 0
+        strategy.order(label, strategy.short, qty=math.abs(d))
+
+f_syncSub("ORB NY",     orbNyPos, prevOrbNyPos)
+f_syncSub("ORB Tokyo",  orbTkPos, prevOrbTkPos)
+f_syncSub("ORB London", orbLdPos, prevOrbLdPos)
+f_syncSub("RBR NY",     rbrNyPos, prevRbrNyPos)
+f_syncSub("RBR Tokyo",  rbrTkPos, prevRbrTkPos)
+f_syncSub("RBR London", rbrLdPos, prevRbrLdPos)
+
+// Save current positions for next bar's comparison
+prevOrbNyPos := orbNyPos
+prevOrbTkPos := orbTkPos
+prevOrbLdPos := orbLdPos
+prevRbrNyPos := rbrNyPos
+prevRbrTkPos := rbrTkPos
+prevRbrLdPos := rbrLdPos
+
+// ═══════════════════════════════════════════════════════════════
+// VISUAL OVERLAYS
+// ═══════════════════════════════════════════════════════════════
+
+// ORB Range lines
+plot(orbNyAfterRange and not na(orbNyRangeHi) ? orbNyRangeHi : na, "ORB NY High", color=color.new(color.blue, 30), style=plot.style_linebr, linewidth=2)
+plot(orbNyAfterRange and not na(orbNyRangeLo) ? orbNyRangeLo : na, "ORB NY Low",  color=color.new(color.blue, 30), style=plot.style_linebr, linewidth=2)
+
+plot(orbTkAfterRange and not na(orbTkRangeHi) ? orbTkRangeHi : na, "ORB TK High", color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+plot(orbTkAfterRange and not na(orbTkRangeLo) ? orbTkRangeLo : na, "ORB TK Low",  color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+
+plot(orbLdAfterRange and not na(orbLdRangeHi) ? orbLdRangeHi : na, "ORB LD High", color=color.new(color.green, 30), style=plot.style_linebr, linewidth=2)
+plot(orbLdAfterRange and not na(orbLdRangeLo) ? orbLdRangeLo : na, "ORB LD Low",  color=color.new(color.green, 30), style=plot.style_linebr, linewidth=2)
+
+// Session background colors
+bgcolor(orbNyInRange ? color.new(color.blue, 92) : na, title="ORB NY Range Period")
+bgcolor(rbrNyInSession ? color.new(color.blue, 96) : na, title="RBR NY Session")
+bgcolor(orbTkInRange ? color.new(color.red, 92) : na, title="ORB TK Range Period")
+bgcolor(rbrTkInSession ? color.new(color.red, 96) : na, title="RBR TK Session")
+bgcolor(orbLdInRange ? color.new(color.green, 92) : na, title="ORB LD Range Period")
+bgcolor(rbrLdInSession ? color.new(color.green, 96) : na, title="RBR LD Session")
+
+// Direction lock indicator
+plotchar(lockedDir == 1,  "Lock Long",  char="L", location=location.bottom, color=color.green, size=size.tiny)
+plotchar(lockedDir == -1, "Lock Short", char="S", location=location.bottom, color=color.red,   size=size.tiny)

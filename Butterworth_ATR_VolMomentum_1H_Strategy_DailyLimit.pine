@@ -1,0 +1,422 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Butterworth ATR Vol-Momentum Strategy [1H] — Prop Firm Safe
+// ─────────────────────────────────────────────────────────────────────────────
+// STRATEGY (not indicator) — generates orders, shows entries/exits, supports alerts.
+//
+// Institutional quant:
+//   1. 2-pole Butterworth low-pass filter (causal lfilter, zero lookahead)
+//   2. ATR expansion + ATR momentum confirmation
+//   3. 2-contract position: TP1 (1 contract) + TP2 (1 contract) + SL
+//
+// PROP FIRM SAFE:
+//   - Trading window: Tokyo open (7:00 PM ET) → NY close (4:00 PM ET)
+//   - Force close ALL positions at 4:00 PM ET (fills ~4:15 on hourly bars)
+//   - No overnight holds past NY close
+//
+// ALERTS: Uses alert() inside entry blocks for RoboQuant / Tradovate webhooks.
+//   When creating the alert: select "alert() function calls only"
+// ─────────────────────────────────────────────────────────────────────────────
+//@version=6
+strategy("BW-ATR Vol-Mom [1H]",
+     shorttitle         = "BW-ATR 1H",
+     overlay            = true,
+     pyramiding         = 0,
+     initial_capital    = 50000,
+     default_qty_type   = strategy.fixed,
+     default_qty_value  = 2,
+     calc_on_order_fills= true,
+     calc_on_every_tick = false,
+     process_orders_on_close = false,
+     margin_long        = 0,
+     margin_short       = 0,
+     max_labels_count   = 500,
+     max_lines_count    = 500)
+
+// ══════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════
+GRP_BW   = "Butterworth Filter"
+GRP_VOL  = "Volatility / ATR"
+GRP_RISK = "Risk Management"
+GRP_PROP = "Prop Firm / Session"
+GRP_VIS  = "Visuals"
+
+bwFastPeriod = input.int(3,    "BW Fast Cutoff Period", minval=3, maxval=100, group=GRP_BW,
+     tooltip="1H tuned. Lower = more responsive signal line.")
+bwSlowPeriod = input.int(5,   "BW Slow Cutoff Period", minval=5, maxval=200, group=GRP_BW,
+     tooltip="1H tuned. Smoother trend reference line.")
+
+atrLen       = input.int(10,   "ATR Length",             minval=3, maxval=50,  group=GRP_VOL)
+volEmaLen    = input.int(75,   "Vol EMA Length",         minval=5, maxval=100, group=GRP_VOL,
+     tooltip="EMA of ATR — baseline for normal volatility.")
+volExpansion = input.float(.6, "Vol Expansion Threshold", minval=0.1, maxval=3.0, step=0.1, group=GRP_VOL,
+     tooltip="ATR must exceed this × ATR_EMA to confirm entry.")
+atrRocLen    = input.int(4,    "ATR ROC Length",         minval=1, maxval=20,  group=GRP_VOL,
+     tooltip="Look-back for ATR rate-of-change. Positive = vol accelerating.")
+
+tp1RR        = input.float(2.0, "TP1 Risk:Reward",      minval=0.5, maxval=10.0, step=0.1, group=GRP_RISK)
+tp2RR        = input.float(5.0, "TP2 Risk:Reward",      minval=0.5, maxval=20.0, step=0.1, group=GRP_RISK)
+slAtrMult    = input.float(5, "SL ATR Multiplier",    minval=0.5, maxval=5.0, step=0.1, group=GRP_RISK)
+tp1Qty       = input.int(1,    "TP1 Contracts",         minval=1, maxval=50, group=GRP_RISK)
+tp2Qty       = input.int(1,    "TP2 Contracts",         minval=1, maxval=50, group=GRP_RISK)
+
+useTrail     = input.bool(true, "Trail Stop to BE after TP1", group=GRP_RISK,
+     tooltip="After TP1 fills, move stop loss to breakeven for the runner.")
+
+useDailyMaxLoss  = input.bool(true, "Enable Daily Max Loss", group=GRP_RISK,
+     tooltip="Stops ALL trading for the rest of the day once cumulative daily P&L hits this loss. Closes any open position.")
+dailyMaxLoss     = input.float(1000.0, "Daily Max Loss ($)", minval=100.0, maxval=10000.0, step=50.0, group=GRP_RISK)
+
+// Prop firm session (all times in Eastern Time)
+useForceClose    = input.bool(true, "Force Close at NY Close", group=GRP_PROP,
+     tooltip="PROP FIRM SAFETY: Closes all positions at 4:00 PM ET.")
+sessionOpenHour  = input.int(19,  "Session Open Hour (ET)",  minval=0, maxval=23, group=GRP_PROP,
+     tooltip="Tokyo open = 19:00 ET (7 PM). Entries allowed from this hour.")
+sessionOpenMin   = input.int(0,   "Session Open Minute",     minval=0, maxval=59, group=GRP_PROP)
+sessionCloseHour = input.int(16,  "Session Close Hour (ET)", minval=0, maxval=23, group=GRP_PROP,
+     tooltip="NY close = 16:00 ET (4 PM). All positions force-closed here.")
+sessionCloseMin  = input.int(0,   "Session Close Minute",    minval=0, maxval=59, group=GRP_PROP)
+
+showBW       = input.bool(true,  "Show Butterworth Lines",  group=GRP_VIS)
+showFill     = input.bool(true,  "Show Trend Fill",         group=GRP_VIS)
+showSignals  = input.bool(true,  "Show Entry Labels",       group=GRP_VIS)
+showSLTP     = input.bool(true,  "Show SL/TP Lines",        group=GRP_VIS)
+showVolBg    = input.bool(true,  "Show Vol Expansion BG",   group=GRP_VIS)
+
+bullColor    = input.color(#00E676, "Bull", inline="colors", group=GRP_VIS)
+bearColor    = input.color(#FF5252, "Bear", inline="colors", group=GRP_VIS)
+
+// ══════════════════════════════════════
+// CONSTANTS
+// ══════════════════════════════════════
+totalContracts = tp1Qty + tp2Qty
+
+// ══════════════════════════════════════
+// 2-POLE BUTTERWORTH LOW-PASS FILTER
+// ══════════════════════════════════════
+// Causal IIR filter — Direct-form II transposed.
+// Matches scipy.signal.butter(2, wn) + lfilter() exactly.
+// Zero lookahead. Forward-only.
+// ──────────────────────────────────────
+
+butterworthFilter(float src, int period) =>
+    float wn = 2.0 / math.max(period, 3)
+    wn := math.min(math.max(wn, 0.0001), 0.9999)
+
+    float warp  = math.tan(math.pi * wn / 2.0)
+    float warp2 = warp * warp
+    float sqrt2 = math.sqrt(2.0)
+    float K     = 1.0 + sqrt2 * warp + warp2
+
+    float b0 = warp2 / K
+    float b1 = 2.0 * b0
+    float b2 = b0
+    float a1 = 2.0 * (warp2 - 1.0) / K
+    float a2 = (1.0 - sqrt2 * warp + warp2) / K
+
+    var float y  = na
+    var float d1 = 0.0
+    var float d2 = 0.0
+
+    if bar_index == 0
+        y  := src
+        d1 := 0.0
+        d2 := 0.0
+    else
+        y  := b0 * src + d1
+        d1 := b1 * src - a1 * y + d2
+        d2 := b2 * src - a2 * y
+    y
+
+// ══════════════════════════════════════
+// INDICATORS
+// ══════════════════════════════════════
+
+float bwFast = butterworthFilter(close, bwFastPeriod)
+float bwSlow = butterworthFilter(close, bwSlowPeriod)
+
+float atrVal = ta.atr(atrLen)
+float atrEma = ta.ema(atrVal, volEmaLen)
+
+float atrPrev = nz(atrVal[atrRocLen], atrVal)
+float atrRoc  = atrPrev > 0 ? (atrVal - atrPrev) / atrPrev : 0.0
+
+bool volExpanding = atrVal > volExpansion * atrEma
+bool volMomentum  = atrRoc > 0
+
+bool bullCross = ta.crossover(bwFast, bwSlow)
+bool bearCross = ta.crossunder(bwFast, bwSlow)
+
+bool trendBull = bwFast > bwSlow
+bool trendBear = bwFast < bwSlow
+
+// ══════════════════════════════════════
+// SESSION LOGIC (Eastern Time)
+// ══════════════════════════════════════
+
+barHourET   = hour(time, "America/New_York")
+barMinuteET = minute(time, "America/New_York")
+barTimeET   = barHourET * 60 + barMinuteET
+
+openTimeET  = sessionOpenHour * 60 + sessionOpenMin    // 19:00 = 1140
+closeTimeET = sessionCloseHour * 60 + sessionCloseMin  // 16:00 = 960
+
+// Session spans midnight: open (19:00) → close (16:00 next day)
+// Active when: time >= 19:00 OR time < 16:00
+inSession = openTimeET > closeTimeET
+     ? (barTimeET >= openTimeET or barTimeET < closeTimeET)
+     : (barTimeET >= openTimeET and barTimeET < closeTimeET)
+
+// Force close zone: at or past NY close
+pastNYClose = barTimeET >= closeTimeET and barTimeET < openTimeET
+
+// ══════════════════════════════════════
+// FORCE CLOSE — Prop Firm Safety
+// ══════════════════════════════════════
+
+if useForceClose and pastNYClose and strategy.position_size != 0
+    strategy.close_all(comment="NY Close")
+
+// ══════════════════════════════════════
+// DAILY P&L TRACKER
+// ══════════════════════════════════════
+
+newDayET = ta.change(dayofweek(time, "America/New_York")) != 0
+
+var float dayStartEquity = strategy.equity
+if newDayET
+    dayStartEquity := strategy.equity
+
+dailyPnL         = strategy.equity - dayStartEquity
+dailyLossBreached = useDailyMaxLoss and dailyPnL <= -dailyMaxLoss
+
+if dailyLossBreached and strategy.position_size != 0
+    strategy.close_all(comment="Daily Max Loss")
+
+// ══════════════════════════════════════
+// TRADE STATE
+// ══════════════════════════════════════
+
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float trailStop  = na
+var int   tradeDir   = 0
+var bool  tp1Hit     = false
+var int   lastEntryBar = -1
+
+canEnter = bar_index != lastEntryBar
+noPosition = strategy.position_size == 0
+
+// ══════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════
+
+bool rawLong  = bullCross and volExpanding and volMomentum
+bool rawShort = bearCross and volExpanding and volMomentum
+
+bool longEntry  = rawLong  and (noPosition or strategy.position_size < 0) and inSession and not pastNYClose and canEnter and not dailyLossBreached
+bool shortEntry = rawShort and (noPosition or strategy.position_size > 0) and inSession and not pastNYClose and canEnter and not dailyLossBreached
+
+// If both fire on same bar, take long only
+if longEntry and shortEntry
+    shortEntry := false
+
+// Confirmed entries (bar close only)
+bool confirmedLong  = longEntry  and barstate.isconfirmed
+bool confirmedShort = shortEntry and barstate.isconfirmed
+
+// ══════════════════════════════════════
+// ENTRIES
+// ══════════════════════════════════════
+
+float riskPts = nz(atrVal * slAtrMult, 25.0)
+
+if confirmedLong and canEnter
+    if strategy.position_size < 0
+        strategy.close_all(comment="Reverse → Long")
+
+    entryPrice   := close
+    tradeDir     := 1
+    slPrice      := close - riskPts
+    tp1Price     := close + riskPts * tp1RR
+    tp2Price     := close + riskPts * tp2RR
+    trailStop    := slPrice
+    tp1Hit       := false
+    lastEntryBar := bar_index
+
+    strategy.entry("Long", strategy.long, qty=totalContracts)
+
+    alert('{"side":"buy","quantity":"' + str.tostring(totalContracts) + '","price":"' + str.tostring(close) + '","sl":"' + str.tostring(slPrice) + '","tp1":"' + str.tostring(tp1Price) + '","tp2":"' + str.tostring(tp2Price) + '"}', alert.freq_once_per_bar_close)
+
+if confirmedShort and canEnter
+    if strategy.position_size > 0
+        strategy.close_all(comment="Reverse → Short")
+
+    entryPrice   := close
+    tradeDir     := -1
+    slPrice      := close + riskPts
+    tp1Price     := close - riskPts * tp1RR
+    tp2Price     := close - riskPts * tp2RR
+    trailStop    := slPrice
+    tp1Hit       := false
+    lastEntryBar := bar_index
+
+    strategy.entry("Short", strategy.short, qty=totalContracts)
+
+    alert('{"side":"sell","quantity":"' + str.tostring(totalContracts) + '","price":"' + str.tostring(close) + '","sl":"' + str.tostring(slPrice) + '","tp1":"' + str.tostring(tp1Price) + '","tp2":"' + str.tostring(tp2Price) + '"}', alert.freq_once_per_bar_close)
+
+// ══════════════════════════════════════
+// TRAILING STOP — Move to BE after TP1
+// ══════════════════════════════════════
+
+if strategy.position_size > 0 and tradeDir == 1
+    if not tp1Hit and high >= tp1Price
+        tp1Hit := true
+        if useTrail
+            trailStop := entryPrice  // move stop to breakeven
+
+if strategy.position_size < 0 and tradeDir == -1
+    if not tp1Hit and low <= tp1Price
+        tp1Hit := true
+        if useTrail
+            trailStop := entryPrice  // move stop to breakeven
+
+// ══════════════════════════════════════
+// EXITS — TP1, TP2, SL
+// ══════════════════════════════════════
+
+if strategy.position_size > 0 and tradeDir == 1
+    if not tp1Hit
+        // Both TPs and SL active
+        strategy.exit("L-TP1", "Long", limit=tp1Price, stop=slPrice, qty=tp1Qty)
+        strategy.exit("L-TP2", "Long", limit=tp2Price, stop=slPrice, qty=tp2Qty)
+    else
+        // TP1 filled — runner with trailing stop (at BE) targeting TP2
+        strategy.exit("L-TP2", "Long", limit=tp2Price, stop=trailStop, qty=tp2Qty)
+
+if strategy.position_size < 0 and tradeDir == -1
+    if not tp1Hit
+        strategy.exit("S-TP1", "Short", limit=tp1Price, stop=slPrice, qty=tp1Qty)
+        strategy.exit("S-TP2", "Short", limit=tp2Price, stop=slPrice, qty=tp2Qty)
+    else
+        strategy.exit("S-TP2", "Short", limit=tp2Price, stop=trailStop, qty=tp2Qty)
+
+// Reset trade state when flat
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tradeDir := 0
+
+// ══════════════════════════════════════
+// VISUALS — Butterworth Lines
+// ══════════════════════════════════════
+
+pFast = plot(showBW ? bwFast : na, "BW Fast", color=color.new(bullColor, 20), linewidth=2)
+pSlow = plot(showBW ? bwSlow : na, "BW Slow", color=color.new(bearColor, 20), linewidth=2)
+fill(pFast, pSlow,
+     color=showFill ? (trendBull ? color.new(bullColor, 88) : color.new(bearColor, 88)) : na,
+     title="Trend Fill")
+
+// ══════════════════════════════════════
+// VISUALS — SL / TP Lines
+// ══════════════════════════════════════
+
+bool tradeActive = strategy.position_size != 0
+
+plot(showSLTP and tradeActive ? entryPrice : na, "Entry",
+     color=color.new(#2979FF, 0), linewidth=2, style=plot.style_linebr)
+plot(showSLTP and tradeActive ? slPrice : na, "SL",
+     color=color.new(#FF1744, 0), linewidth=2, style=plot.style_linebr)
+plot(showSLTP and tradeActive and not tp1Hit ? tp1Price : na, "TP1",
+     color=color.new(#00E676, 0), linewidth=1, style=plot.style_linebr)
+plot(showSLTP and tradeActive ? tp2Price : na, "TP2",
+     color=color.new(#00E676, 0), linewidth=2, style=plot.style_linebr)
+plot(showSLTP and tradeActive and tp1Hit and useTrail ? trailStop : na, "Trail (BE)",
+     color=color.new(#FF9800, 0), linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════
+// VISUALS — Entry Labels
+// ══════════════════════════════════════
+
+if showSignals and confirmedLong and canEnter
+    label.new(bar_index, low, "Long", color=bullColor, textcolor=color.white,
+         style=label.style_label_up, size=size.small, yloc=yloc.belowbar)
+
+if showSignals and confirmedShort and canEnter
+    label.new(bar_index, high, "Short", color=bearColor, textcolor=color.white,
+         style=label.style_label_down, size=size.small, yloc=yloc.abovebar)
+
+// ══════════════════════════════════════
+// VISUALS — Vol Expansion Background
+// ══════════════════════════════════════
+
+bgcolor(showVolBg and volExpanding and volMomentum ? color.new(#FFEB3B, 93) : na,
+     title="Vol Regime Active")
+
+// Session closed background
+bgcolor(pastNYClose ? color.new(#FF1744, 95) : na, title="Session Closed")
+
+// Daily loss breached background
+bgcolor(dailyLossBreached ? color.new(#FF1744, 90) : na, title="Daily Loss Breached")
+
+// ══════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 12, color.new(#131722, 5), color.new(#2A2E39, 0), 1)
+
+if barstate.islast
+    trendStr = trendBull ? "Bullish" : trendBear ? "Bearish" : "Neutral"
+    trendCol = trendBull ? bullColor : trendBear ? bearColor : color.gray
+
+    table.cell(dash, 0, 0, "BW-ATR 1H Strategy",
+         text_color=color.white, bgcolor=color.new(#2962FF, 0), text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    table.cell(dash, 0, 1, "Trend",       text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, trendStr,      text_color=trendCol,   text_size=size.small)
+
+    volStr = volExpanding and volMomentum ? "ACTIVE" : volExpanding ? "Expanding" : "Quiet"
+    volCol = volExpanding and volMomentum ? bullColor : volExpanding ? #FFEB3B : color.gray
+    table.cell(dash, 0, 2, "Vol Regime",  text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 2, volStr,        text_color=volCol,     text_size=size.small)
+
+    rocStr = str.tostring(atrRoc * 100, "#.#") + "%"
+    rocCol = volMomentum ? bullColor : bearColor
+    table.cell(dash, 0, 3, "ATR ROC",    text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 3, rocStr,        text_color=rocCol,     text_size=size.small)
+
+    table.cell(dash, 0, 4, "ATR",         text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(atrVal, "#.##"), text_color=color.white, text_size=size.small)
+
+    sessStr = inSession ? "OPEN" : "CLOSED"
+    sessCol = inSession ? bullColor : bearColor
+    table.cell(dash, 0, 5, "Session",     text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, sessStr,       text_color=sessCol,    text_size=size.small)
+
+    etStr = str.tostring(barHourET, "00") + ":" + str.tostring(barMinuteET, "00") + " ET"
+    table.cell(dash, 0, 6, "Time",        text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 6, etStr,         text_color=color.white, text_size=size.small)
+
+    posStr = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "Flat"
+    posCol = tradeDir == 1 ? bullColor : tradeDir == -1 ? bearColor : color.gray
+    table.cell(dash, 0, 7, "Position",    text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 7, posStr,        text_color=posCol,     text_size=size.small)
+
+    tp1Str = tp1Hit ? "HIT" : tradeActive ? "Pending" : "—"
+    tp1Col = tp1Hit ? bullColor : tradeActive ? #FFEB3B : color.gray
+    table.cell(dash, 0, 8, "TP1",         text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 8, tp1Str,        text_color=tp1Col,     text_size=size.small)
+
+    table.cell(dash, 0, 9, "Contracts",   text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(totalContracts), text_color=color.white, text_size=size.small)
+
+    dailyPnLStr = "$" + str.tostring(dailyPnL, "#.00")
+    dailyPnLCol = dailyLossBreached ? #FF1744 : dailyPnL >= 0 ? bullColor : bearColor
+    table.cell(dash, 0, 10, "Day P&L",    text_color=color.gray,   text_size=size.small)
+    table.cell(dash, 1, 10, dailyPnLStr,  text_color=dailyPnLCol,  text_size=size.small)
+
+    limitStr = dailyLossBreached ? "STOPPED" : str.tostring(-dailyMaxLoss - dailyPnL, "#.00") + " left"
+    limitCol = dailyLossBreached ? #FF1744 : color.white
+    table.cell(dash, 0, 11, "Day Limit",  text_color=color.gray,   text_size=size.small)
+    table.cell(dash, 1, 11, limitStr,     text_color=limitCol,     text_size=size.small)
