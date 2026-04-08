@@ -1,0 +1,10 @@
+{
+  "first_tp_points": 10.0,
+  "second_tp_points": 20.0,
+  "trail_distance_points": 10.0,
+  "runner_be_trigger_points": 12.0,
+  "max_stop_points": 80.0,
+  "min_range_width": 25.0,
+  "max_range_width": 90.0,
+  "initial_capital": 50000.0
+}

@@ -1,0 +1,15 @@
+{
+  "contracts_per_trade": 2,
+  "vol_lookback": 20,
+  "max_base_bars": 3,
+  "rbr_lookback": 40,
+  "fixed_risk_points": 40.0,
+  "first_rr_ratio": 2.5,
+  "runner_rr_ratio": 2.5,
+  "fast_len": 8,
+  "slow_len": 20,
+  "vol_multiplier": 2.0,
+  "rbr_body_ratio": 0.6,
+  "base_doji_ratio": 0.4,
+  "initial_capital": 50000.0
+}

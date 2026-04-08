@@ -21,5 +21,4 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
-# Saved params (user-specific)
-saved_params/
+# Include saved_params/ in repo so cloud deployment uses tuned parameters

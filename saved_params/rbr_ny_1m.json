@@ -1,0 +1,20 @@
+{
+  "initial_capital": 50000.0,
+  "point_value": 2.0,
+  "use_max_trade_loss": false,
+  "use_daily_max_loss": false,
+  "max_trade_loss": 300.0,
+  "daily_max_loss": 1000.0,
+  "contracts_per_trade": 2,
+  "vol_lookback": 20,
+  "max_base_bars": 3,
+  "rbr_lookback": 40,
+  "fixed_risk_points": 90.0,
+  "first_rr_ratio": 2.0,
+  "runner_rr_ratio": 2.5,
+  "fast_len": 8,
+  "slow_len": 20,
+  "vol_multiplier": 2.0,
+  "rbr_body_ratio": 0.6,
+  "base_doji_ratio": 0.4
+}

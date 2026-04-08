@@ -1,0 +1,15 @@
+{
+  "rsi_len": 10,
+  "rsi_oversold": 25,
+  "rsi_overbought": 65,
+  "trend_ema_len": 50,
+  "atr_len": 14,
+  "sl_atr_mult": 1.5,
+  "tp_atr_mult": 1.5,
+  "initial_capital": 50000.0,
+  "point_value": 2.0,
+  "use_max_trade_loss": false,
+  "max_trade_loss": 300.0,
+  "use_daily_max_loss": false,
+  "daily_max_loss": 800.0
+}

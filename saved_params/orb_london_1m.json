@@ -1,0 +1,16 @@
+{
+  "contracts_per_trade": 3,
+  "first_tp_points": 19.0,
+  "second_tp_points": 20.0,
+  "trail_distance_points": 2.0,
+  "runner_be_trigger_points": 15.0,
+  "max_stop_points": 130.0,
+  "min_range_width": 50.0,
+  "max_range_width": 275.0,
+  "initial_capital": 50000.0,
+  "point_value": 2.0,
+  "use_max_trade_loss": false,
+  "max_trade_loss": 300.0,
+  "use_daily_max_loss": false,
+  "daily_max_loss": 1000.0
+}

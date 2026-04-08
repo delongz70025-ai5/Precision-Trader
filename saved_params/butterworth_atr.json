@@ -1,0 +1,19 @@
+{
+  "initial_capital": 50000.0,
+  "point_value": 2.0,
+  "use_max_trade_loss": false,
+  "use_daily_max_loss": false,
+  "max_trade_loss": 300.0,
+  "daily_max_loss": 1000.0,
+  "contracts": 2,
+  "fee_pct": 0.0015,
+  "use_session": 1,
+  "bw_fast_period": 8,
+  "bw_slow_period": 30,
+  "atr_len": 10,
+  "vol_ema_len": 15,
+  "vol_expansion": 0.8,
+  "atr_roc_len": 3,
+  "sl_atr_mult": 1.5,
+  "tp_atr_mult": 2.5
+}
