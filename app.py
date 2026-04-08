@@ -1525,7 +1525,7 @@ with tab_opt:
     st.markdown("#### Backtest Engine")
     opt_engine = st.radio(
         "Engine",
-        ["Backtrader", "Native"],
+        ["Native", "Backtrader"],
         index=0,
         horizontal=True,
         key="opt_engine",

@@ -47,35 +47,31 @@ def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
                factor: float = 4.0, atr_len: int = 10):
     atr_val = atr(high, low, close, atr_len)
     hl2 = (high + low) / 2
-    upper_band = hl2 + factor * atr_val
-    lower_band = hl2 - factor * atr_val
+    ub = (hl2 + factor * atr_val).values.copy()
+    lb = (hl2 - factor * atr_val).values.copy()
+    close_arr = close.values
+    n = len(close_arr)
+    dir_arr = np.ones(n)
+    st_arr = np.full(n, np.nan)
 
-    direction = pd.Series(np.ones(len(close)), index=close.index)
-    supertrend_line = pd.Series(np.full(len(close), np.nan), index=close.index)
-
-    for i in range(1, len(close)):
-        prev_upper = upper_band.iloc[i - 1]
-        prev_lower = lower_band.iloc[i - 1]
-        cur_upper = upper_band.iloc[i]
-        cur_lower = lower_band.iloc[i]
-        cur_close = close.iloc[i]
-        prev_close = close.iloc[i - 1]
-        prev_dir = direction.iloc[i - 1]
-
+    for i in range(1, n):
         # Clamp bands
-        upper_band.iloc[i] = cur_upper if cur_upper < prev_upper or prev_close > prev_upper else prev_upper
-        lower_band.iloc[i] = cur_lower if cur_lower > prev_lower or prev_close < prev_lower else prev_lower
+        if ub[i] >= ub[i - 1] and close_arr[i - 1] <= ub[i - 1]:
+            ub[i] = ub[i - 1]
+        if lb[i] <= lb[i - 1] and close_arr[i - 1] >= lb[i - 1]:
+            lb[i] = lb[i - 1]
 
-        if prev_dir == 1 and cur_close < lower_band.iloc[i]:
-            direction.iloc[i] = -1
-        elif prev_dir == -1 and cur_close > upper_band.iloc[i]:
-            direction.iloc[i] = 1
+        if dir_arr[i - 1] == 1 and close_arr[i] < lb[i]:
+            dir_arr[i] = -1
+        elif dir_arr[i - 1] == -1 and close_arr[i] > ub[i]:
+            dir_arr[i] = 1
         else:
-            direction.iloc[i] = prev_dir
+            dir_arr[i] = dir_arr[i - 1]
 
-        supertrend_line.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
+        st_arr[i] = lb[i] if dir_arr[i] == 1 else ub[i]
 
-    return supertrend_line, direction
+    return (pd.Series(st_arr, index=close.index),
+            pd.Series(dir_arr, index=close.index))
 
 
 def dmi(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
@@ -223,6 +219,31 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
 
     warmup = max(p.ema_trend_len, 50)
 
+    # ── Pre-extract numpy arrays for speed (avoids .iloc[] overhead) ────────
+    _open_arr   = df["open"].values
+    _high_arr   = df["high"].values
+    _low_arr    = df["low"].values
+    _close_arr  = df["close"].values
+    _vol_arr    = vol.values
+    _ef_arr     = ema_fast.values
+    _es_arr     = ema_slow.values
+    _et_arr     = ema_trend.values
+    _rsi_arr    = rsi_val.values
+    _mh_arr     = macd_hist.values
+    _ml_arr     = macd_line.values
+    _ms_arr     = macd_sig.values
+    _vw_arr     = vwap_val.values
+    _va_arr     = vol_above.values
+    _st_strong  = strong_trend.values
+    _dp_arr     = di_plus.values
+    _dm_arr     = di_minus.values
+    _atr_risk_arr = atr_risk.values
+    _stbull_arr = st_bull.values
+    _stbear_arr = st_bear.values
+    _stdir_arr  = st_dir.values
+    _vr_arr     = vol_ratio.values
+    _idx_arr    = df.index
+
     # ── Trade state ─────────────────────────────────────────────────────────
     equity        = p.initial_capital
     trades        = []
@@ -253,13 +274,13 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
     n = len(df)
 
     for i in range(n):
-        bar_time  = df.index[i]
+        bar_time  = _idx_arr[i]
         bar_date  = bar_time.date()
-        o = df["open"].iloc[i]
-        h = df["high"].iloc[i]
-        l = df["low"].iloc[i]
-        c = df["close"].iloc[i]
-        v = vol.iloc[i]
+        o = _open_arr[i]
+        h = _high_arr[i]
+        l = _low_arr[i]
+        c = _close_arr[i]
+        v = _vol_arr[i]
 
         # ── New day reset ───────────────────────────────────────────────────
         if prev_date is None or bar_date != prev_date:
@@ -325,21 +346,21 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
                 close_position("Max Trade Loss")
 
         # ── Risk points ─────────────────────────────────────────────────────
-        risk_pts = max(float(atr_risk.iloc[i]) * p.atr_risk_mult, 4.0) if p.use_atr_risk else p.fixed_risk_pts
+        risk_pts = max(float(_atr_risk_arr[i]) * p.atr_risk_mult, 4.0) if p.use_atr_risk else p.fixed_risk_pts
 
         # ── Confluence scores ───────────────────────────────────────────────
-        ef  = float(ema_fast.iloc[i])
-        es  = float(ema_slow.iloc[i])
-        et  = float(ema_trend.iloc[i])
-        rsi_ = float(rsi_val.iloc[i]) if not np.isnan(rsi_val.iloc[i]) else 50.0
-        mh  = float(macd_hist.iloc[i]) if not np.isnan(macd_hist.iloc[i]) else 0.0
-        ml  = float(macd_line.iloc[i]) if not np.isnan(macd_line.iloc[i]) else 0.0
-        ms  = float(macd_sig.iloc[i]) if not np.isnan(macd_sig.iloc[i]) else 0.0
-        vw  = float(vwap_val.iloc[i]) if not np.isnan(vwap_val.iloc[i]) else c
-        va  = bool(vol_above.iloc[i]) if not np.isnan(vol_above.iloc[i]) else True
-        st_ = bool(strong_trend.iloc[i]) if not np.isnan(strong_trend.iloc[i]) else False
-        dp  = float(di_plus.iloc[i]) if not np.isnan(di_plus.iloc[i]) else 0.0
-        dm  = float(di_minus.iloc[i]) if not np.isnan(di_minus.iloc[i]) else 0.0
+        ef  = _ef_arr[i]
+        es  = _es_arr[i]
+        et  = _et_arr[i]
+        rsi_ = _rsi_arr[i] if not np.isnan(_rsi_arr[i]) else 50.0
+        mh  = _mh_arr[i] if not np.isnan(_mh_arr[i]) else 0.0
+        ml  = _ml_arr[i] if not np.isnan(_ml_arr[i]) else 0.0
+        ms  = _ms_arr[i] if not np.isnan(_ms_arr[i]) else 0.0
+        vw  = _vw_arr[i] if not np.isnan(_vw_arr[i]) else c
+        va  = bool(_va_arr[i]) if not np.isnan(_va_arr[i]) else True
+        st_ = bool(_st_strong[i]) if not np.isnan(_st_strong[i]) else False
+        dp  = _dp_arr[i] if not np.isnan(_dp_arr[i]) else 0.0
+        dm  = _dm_arr[i] if not np.isnan(_dm_arr[i]) else 0.0
 
         bull_score = 0.0
         bull_score += 1.0 if ef > es else 0.0
@@ -365,8 +386,8 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         bear_score += 0.5 if c < ef else 0.0
 
         # ── Supertrend filter ────────────────────────────────────────────────
-        st_b = bool(st_bull.iloc[i]) if not np.isnan(float(st_dir.iloc[i])) else True
-        st_br = bool(st_bear.iloc[i]) if not np.isnan(float(st_dir.iloc[i])) else False
+        st_b = bool(_stbull_arr[i]) if not np.isnan(_stdir_arr[i]) else True
+        st_br = bool(_stbear_arr[i]) if not np.isnan(_stdir_arr[i]) else False
         st_pass_long  = (not p.use_supertrend) or st_b
         st_pass_short = (not p.use_supertrend) or st_br
 
@@ -376,8 +397,8 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
             dates.append(bar_time)
             continue
 
-        ef_prev = float(ema_fast.iloc[i - 1])
-        es_prev = float(ema_slow.iloc[i - 1])
+        ef_prev = _ef_arr[i - 1]
+        es_prev = _es_arr[i - 1]
 
         ema_bull_cross = (ef_prev <= es_prev) and (ef > es)
         ema_bear_cross = (ef_prev >= es_prev) and (ef < es)
@@ -391,12 +412,12 @@ def run_backtest(df: pd.DataFrame, params: StrategyParams) -> dict:
         trend_bullish = (ef > es) and (c > et)
         trend_bearish = (ef < es) and (c < et)
 
-        hi_prev1 = df["high"].iloc[i - 1]
-        hi_prev2 = df["high"].iloc[i - 2] if i >= 2 else hi_prev1
-        lo_prev1 = df["low"].iloc[i - 1]
-        lo_prev2 = df["low"].iloc[i - 2] if i >= 2 else lo_prev1
-        ef_prev1 = float(ema_fast.iloc[i - 1])
-        ef_prev2 = float(ema_fast.iloc[i - 2]) if i >= 2 else ef_prev1
+        hi_prev1 = _high_arr[i - 1]
+        hi_prev2 = _high_arr[i - 2] if i >= 2 else hi_prev1
+        lo_prev1 = _low_arr[i - 1]
+        lo_prev2 = _low_arr[i - 2] if i >= 2 else lo_prev1
+        ef_prev1 = _ef_arr[i - 1]
+        ef_prev2 = _ef_arr[i - 2] if i >= 2 else ef_prev1
 
         bull_pb = trend_bullish and (c > ef) and (l <= ef or lo_prev1 <= ef_prev1 or lo_prev2 <= ef_prev2)
         bear_pb = trend_bearish and (c < ef) and (h >= ef or hi_prev1 >= ef_prev1 or hi_prev2 >= ef_prev2)
