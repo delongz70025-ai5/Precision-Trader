@@ -644,8 +644,12 @@ def load_from_yfinance(ticker: str, interval: str = "15m") -> pd.DataFrame:
     return _normalize_df(raw)
 
 
-def _load_builtin_csv(name: str) -> pd.DataFrame:
-    """Load a built-in CSV, preferring .csv.gz if available."""
+@st.cache_data(show_spinner=False)
+def _load_builtin_csv(name: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Load a built-in CSV, preferring .csv.gz if available.
+    Optionally filters to [start_date, end_date] before normalizing to save memory.
+    Pass dates as ISO strings for caching (e.g. '2025-04-01').
+    """
     base = os.path.join(os.path.dirname(__file__), "data")
     gz_path = os.path.join(base, name + ".gz")
     csv_path = os.path.join(base, name)
@@ -657,17 +661,26 @@ def _load_builtin_csv(name: str) -> pd.DataFrame:
         return pd.DataFrame()
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
+    # Filter early — before normalize — to reduce memory footprint
+    if start_date is not None:
+        _s = pd.Timestamp(start_date, tz="UTC")
+        df = df.loc[_s:]
+    if end_date is not None:
+        _e = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+        df = df.loc[:_e]
     return _normalize_df(df)
 
 
-@st.cache_data(show_spinner=False)
-def load_builtin_mnq():
-    return _load_builtin_csv("MNQ_1min_continuous.csv")
+def load_builtin_mnq(start_date=None, end_date=None):
+    return _load_builtin_csv("MNQ_1min_continuous.csv",
+                             str(start_date) if start_date else None,
+                             str(end_date) if end_date else None)
 
 
-@st.cache_data(show_spinner=False)
-def load_builtin_mym():
-    return _load_builtin_csv("MYM_1min_continuous.csv")
+def load_builtin_mym(start_date=None, end_date=None):
+    return _load_builtin_csv("MYM_1min_continuous.csv",
+                             str(start_date) if start_date else None,
+                             str(end_date) if end_date else None)
 
 
 def load_data_from_source(data_source, uploaded_file, ticker, timeframe):
@@ -1541,7 +1554,7 @@ with tab_opt:
         if opt_dataset in BUILTIN_DATASETS:
             _ds_info = BUILTIN_DATASETS[opt_dataset]
             with st.spinner(f"Loading built-in {_ds_info['label']}..."):
-                df_opt = globals()[_ds_info["loader"]]()
+                df_opt = globals()[_ds_info["loader"]](start_date=opt_start_date, end_date=opt_end_date)
         elif opt_dataset == "Upload CSV/XLSX":
             if opt_uploaded is None:
                 st.error("Upload a data file above.")
@@ -1632,7 +1645,9 @@ with tab_opt:
 
         # Save data source info so equity curve viewer can reload
         if opt_dataset in BUILTIN_DATASETS:
-            _df_info = {"source": f"builtin_{opt_dataset}", "loader": BUILTIN_DATASETS[opt_dataset]["loader"], "resample": opt_resample}
+            _df_info = {"source": f"builtin_{opt_dataset}", "loader": BUILTIN_DATASETS[opt_dataset]["loader"], "resample": opt_resample,
+                        "start_date": str(opt_start_date) if opt_start_date else None,
+                        "end_date": str(opt_end_date) if opt_end_date else None}
         elif opt_dataset == "Upload CSV/XLSX":
             _df_info = {"source": "upload"}
         elif opt_dataset == "yfinance":
@@ -1770,7 +1785,9 @@ with tab_opt:
                             if _info["source"] == "upload":
                                 st.error("Re-upload the file to view equity curves.")
                             elif "loader" in _info:
-                                _df_eq = globals()[_info["loader"]]()
+                                _df_eq = globals()[_info["loader"]](
+                                    start_date=_info.get("start_date"),
+                                    end_date=_info.get("end_date"))
                                 _rs = {"1m": None, "5m": "5min", "15m": "15min", "1h": "1h", "1d": "1D"}.get(_info.get("resample", "1m"))
                                 if _rs:
                                     _df_eq = resample_ohlcv(_df_eq, _rs)
@@ -2515,7 +2532,7 @@ with tab_bt:
         with st.spinner("Loading data..."):
             if bt_dataset in BUILTIN_DATASETS:
                 loader_name = BUILTIN_DATASETS[bt_dataset]["loader"]
-                df_bt = globals()[loader_name]()
+                df_bt = globals()[loader_name](start_date=_bt_start_date, end_date=_bt_end_date)
                 if df_bt.empty:
                     _err = f"Built-in {bt_dataset} data file not found."
             elif bt_dataset == "Upload CSV/XLSX":
